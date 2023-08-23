@@ -1,10 +1,3 @@
-"""
-Created on Oct 10, 2018
-Tensorflow Implementation of Neural Graph Collaborative Filtering (NGCF) model in:
-Wang Xiang et al. Neural Graph Collaborative Filtering. In SIGIR 2019.
-
-@author: Xiang Wang (xiangwang@u.nus.edu)
-"""
 import os
 import numpy as np
 import random as rd
@@ -14,15 +7,13 @@ from numpy import ndarray
 
 
 class Data(object):
-    def __init__(self, path, batch_size, percent_similar=0.8):
+    def __init__(self, path, batch_size):
         self.path = path
         self.batch_size = batch_size
         self.n_users, self.n_items = 0, 0
         self.n_train, self.n_test = 0, 0
         self.neg_pools = {}
         self.exist_users = []
-        self.percent_similar = percent_similar
-        self.max_one_mat = 999999999999
 
         with open(path + '/train.txt') as f:
             for l in f.readlines():
@@ -81,6 +72,7 @@ class Data(object):
         self.U = self.R.dot(self.R.transpose())
         self.I = self.R.transpose().dot(self.R)
 
+        self.n_social = 0
         if os.path.exists(path + '/social_trust.txt'):
             with open(path + '/social_trust.txt') as f_social:
                 for l in f_social.readlines():
@@ -91,46 +83,50 @@ class Data(object):
                     uid, friends = users[0], users[1:]
                     for i in friends:
                         self.S[uid, i] = 1.
+                        self.n_social = self.n_social + 1
 
     def get_norm_adj_mat(self):
+        def normalized_sym(adj):
+            rowsum: ndarray = np.array(adj.sum(1))
+            d_inv = np.power(rowsum, -0.5).flatten()
+            d_inv[np.isinf(d_inv)] = 0.
+            d_mat_inv = sp.diags(d_inv)
+
+            norm_adj = d_mat_inv.dot(adj)
+            norm_adj = norm_adj.dot(d_mat_inv)
+            return norm_adj.tocsr()
+
         try:
             t1 = time()
             interaction_adj_mat_sym = sp.load_npz(self.path + '/s_interaction_adj_mat.npz')
-            social_adj_mat_sym = sp.load_npz(self.path + '/s_social_adj_mat.npz')
-            similar_users_adj_mat_sym = sp.load_npz(self.path + '/s_similar_users_adj_mat.npz')
-
             print('already load interaction adj matrix', interaction_adj_mat_sym.shape, time() - t1)
-            print('already load social adj matrix', social_adj_mat_sym.shape, time() - t1)
-            print('already load similar users adj matrix', similar_users_adj_mat_sym.shape, time() - t1)
-
         except Exception:
-            interaction_adj_mat, social_adj_mat, similar_users_adj_mat = self.create_adj_mat()
-
-            def normalized_sym(adj):
-                rowsum: ndarray = np.array(adj.sum(1))
-                d_inv = np.power(rowsum, -0.5).flatten()
-                d_inv[np.isinf(d_inv)] = 0.
-                d_mat_inv = sp.diags(d_inv)
-
-                norm_adj = d_mat_inv.dot(adj)
-                norm_adj = norm_adj.dot(d_mat_inv)
-                return norm_adj.tocsr()
-
+            interaction_adj_mat = self.create_interaction_adj_mat()
             interaction_adj_mat_sym = normalized_sym(interaction_adj_mat)
             print('generate symmetrically normalized interaction adjacency matrix.')
             sp.save_npz(self.path + '/s_interaction_adj_mat.npz', interaction_adj_mat_sym)
-
+        try:
+            t2 = time()
+            social_adj_mat_sym = sp.load_npz(self.path + '/s_social_adj_mat.npz')
+            print('already load social adj matrix', social_adj_mat_sym.shape, time() - t2)
+        except Exception:
+            social_adj_mat = self.create_social_adj_mat()
             social_adj_mat_sym = normalized_sym(social_adj_mat)
             print('generate symmetrically normalized social adjacency matrix.')
             sp.save_npz(self.path + '/s_social_adj_mat.npz', social_adj_mat_sym)
-
+        try:
+            t3 = time()
+            similar_users_adj_mat_sym = sp.load_npz(self.path + '/s_similar_users_adj_mat.npz')
+            print('already load similar users adj matrix', similar_users_adj_mat_sym.shape, time() - t3)
+        except Exception:
+            similar_users_adj_mat = self.create_similar_adj_mat()
             similar_users_adj_mat_sym = normalized_sym(similar_users_adj_mat)
             print('generate symmetrically normalized similar users adjacency matrix.')
-            sp.save_npz(self.path + '/s_similar_users_adj_mat.npz', similar_users_adj_mat)
+            sp.save_npz(self.path + '/s_similar_users_adj_mat.npz', similar_users_adj_mat_sym)
 
         return interaction_adj_mat_sym, social_adj_mat_sym, similar_users_adj_mat_sym
 
-    def create_adj_mat(self):
+    def create_interaction_adj_mat(self):
         # 1. Create Graph Users-Items  Interaction Adjacency Matrix.
         t1 = time()
         interaction_adj_mat = sp.dok_matrix((self.n_users + self.n_items, self.n_users + self.n_items),
@@ -142,77 +138,45 @@ class Data(object):
                 R[int(self.n_users * i / 5.0):int(self.n_users * (i + 1.0) / 5)]
             interaction_adj_mat[self.n_users:, int(self.n_users * i / 5.0):int(self.n_users * (i + 1.0) / 5)] = \
                 R[int(self.n_users * i / 5.0):int(self.n_users * (i + 1.0) / 5)].T
-        interaction_adj_mat = interaction_adj_mat.todok()
         print('already create interaction adjacency matrix', interaction_adj_mat.shape, time() - t1)
+        return interaction_adj_mat.tocsr()
 
+    def create_social_adj_mat(self):
         # 2. Create Graph Users-Users Social Adjacency Matrix.
         t2 = time()
         social_adj_mat = self.S
-        print('already create social adjacency matrix', social_adj_mat.shape, time() - t2)
+        print('already create social adjacency matrix', social_adj_mat.shape, 'social_interactons:', self.n_social,
+              time() - t2)
+        return social_adj_mat.tocsr()
 
-        # 3. Create Graph Users-Users Similar Interaction( or Interest) Adjacency Matrix.
+    def create_similar_adj_mat(self):
         t3 = time()
-        U = self.U.tolil()
+        similar_users_adj_mat = sp.dok_matrix((self.n_users, self.n_users), dtype=np.float32)
 
-        diag: ndarray = U.diagonal()
-        list_full_diag = []
+        def cluster(x, d, t):
+            v = x / (t + d - x)
+            if v <= 0.09:
+                return 0
+            elif 0.09 < v <= 0.39:
+                return 1
+            elif 0.39 < v <= 0.49:
+                return 10
+            elif 0.49 < v <= 0.79:
+                return 100
+            else:
+                return 200
 
-        list_full_fold1 = []
-        list_full_fold2 = []
-        list_full_fold3 = []
-        list_full_fold4 = []
-        list_full_refine = []
+        X = self.U.toarray()
+        vfunc = np.vectorize(cluster)
 
-        for i in range(self.n_users):
-            list_full_diag.append([diag[i]] * self.n_users)
-            list_full_fold1.append([0.79] * self.n_users)
-            list_full_fold2.append([0.49] * self.n_users)
-            list_full_fold3.append([0.39] * self.n_users)
-            list_full_fold4.append([0.09] * self.n_users)
+        diag: ndarray = X.diagonal()
+        for i in range(X.shape[0]):
+            tmp = vfunc(X[i], diag, diag[i])
+            similar_users_adj_mat[i] = tmp
+        print('already create similar users adjacency matrix', similar_users_adj_mat.shape, time() - t3)
+        similar_users_adj_mat = sp.csr_matrix(similar_users_adj_mat)
 
-            list_full_refine.append([self.max_one_mat] * self.n_users)
-
-        full_diag_mat = sp.csr_matrix(list_full_diag)
-
-        full_fold1 = sp.csr_matrix(list_full_fold1)
-        full_fold2 = sp.csr_matrix(list_full_fold2)
-        full_fold3 = sp.csr_matrix(list_full_fold3)
-        full_fold4 = sp.csr_matrix(list_full_fold4)
-
-        full_refine = sp.csr_matrix(list_full_refine)
-
-        # calculate similarity between users through Jaccard similarity
-        union = (full_diag_mat.transpose() + full_diag_mat - U).toarray()
-        union = np.power(union, -1)
-        similar_users_adj_mat = U.multiply(union)
-        similar_users_adj_mat.setdiag(0, k=0)
-
-        # Fold 5 : processing which 80 ->
-        similar_users_adj_mat_f1 = similar_users_adj_mat - full_fold1
-        similar_users_adj_mat_f1 = similar_users_adj_mat_f1.multiply(full_refine)
-        similar_users_adj_mat_f1 = similar_users_adj_mat_f1.toarray().clip(min=0).clip(max=100)
-
-        # Fold 2 : processing which 50 ~ 80
-        similar_users_adj_mat_f2 = similar_users_adj_mat - full_fold2
-        similar_users_adj_mat_f2 = similar_users_adj_mat_f2.multiply(full_refine)
-        similar_users_adj_mat_f2 = similar_users_adj_mat_f2.toarray().clip(min=0).clip(max=90)
-
-        # Fold 3 : processing which 40 ~ 50
-        similar_users_adj_mat_f3 = similar_users_adj_mat - full_fold3
-        similar_users_adj_mat_f3 = similar_users_adj_mat_f3.multiply(full_refine)
-        similar_users_adj_mat_f3 = similar_users_adj_mat_f3.toarray().clip(min=0).clip(max=9)
-
-        # Fold 4 : processing which 10 ->
-        similar_users_adj_mat_f4 = similar_users_adj_mat - full_fold4
-        similar_users_adj_mat_f4 = similar_users_adj_mat_f4.multiply(full_refine)
-        similar_users_adj_mat_f4 = similar_users_adj_mat_f4.toarray().clip(min=0).clip(max=1)
-
-        similar_users_adj_mat = sp.csr_matrix(
-            similar_users_adj_mat_f1 + similar_users_adj_mat_f2 + similar_users_adj_mat_f3 +
-            similar_users_adj_mat_f4)
-        print('already create similar users adjacency matrix', time() - t3)
-
-        return interaction_adj_mat.tocsr(), social_adj_mat.tocsr(), similar_users_adj_mat.tocsr()
+        return similar_users_adj_mat.tocsr()
 
     def sample(self):
         if self.batch_size <= self.n_users:
