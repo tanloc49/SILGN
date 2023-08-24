@@ -787,11 +787,11 @@ if __name__ == '__main__':
     *********************************************************
     Generate the Laplacian matrix, where each entry defines the decay factor (e.g., p_ui) between two connected nodes.
     """
-    interaction_adj, social_adj, similar_users_adj, similar_items_adj = data_generator.get_norm_adj_mat()
+    interaction_adj, social_adj, similar_users_adj = data_generator.get_norm_adj_mat()
     config['norm_adj'] = interaction_adj
     config['social_adj'] = social_adj
     config['similar_users_adj'] = similar_users_adj
-    config['similar_items_adj'] = similar_items_adj
+    config['similar_items_adj'] = similar_users_adj
 
     t0 = time()
     if args.pretrain == -1:
